@@ -5,64 +5,84 @@ import uuid
 import threading
 import http.server
 import socketserver
-from aiogram import Bot, Dispatcher, F
+import os
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import Message, BufferedInputFile
 from docx import Document
 from ebooklib import epub
 
 # --- СЕРВЕР-ЗАГЛУШКА ДЛЯ RENDER ---
 def run_dummy_server():
-    # Render передает порт в переменной окружения PORT, по умолчанию 10000
-    import os
     port = int(os.environ.get("PORT", 10000))
     handler = http.server.SimpleHTTPRequestHandler
-    # Разрешаем повторное использование порта
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", port), handler) as httpd:
-        logging.info(f"Слушаю порт {port} для Render...")
         httpd.serve_forever()
 
-# Запускаем сервер в фоновом потоке
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- ДАЛЕЕ ВАШ КОД БОТА (TOKEN, dp, функции и т.д.) ---
+# --- НАСТРОЙКИ ---
 TOKEN = "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo"
-# ... и так далее
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-def convert_docx_to_epub(docx_bytes, filename):
-    """Логика конвертации документа в книгу"""
+# Хранилище для временных данных (в продакшене лучше использовать БД или Redis)
+user_data = {}
+
+# Красивый CSS для книги
+STYLE = '''
+@namespace epub "http://www.idpf.org/2007/ops";
+body {
+    font-family: "Georgia", serif;
+    margin: 5%;
+    line-height: 1.5;
+    text-align: justify;
+}
+h1, h2 {
+    text-align: center;
+    color: #333;
+    margin-top: 1em;
+}
+p {
+    text-indent: 1.5em; /* Красная строка */
+    margin-bottom: 0.5em;
+}
+img {
+    display: block;
+    margin: 1em auto;
+    max-width: 100%;
+}
+'''
+
+def create_epub(docx_bytes, filename, cover_image=None):
     doc = Document(io.BytesIO(docx_bytes))
     book = epub.EpubBook()
     
-    # Метаданные книги
     title = filename.replace(".docx", "")
     book.set_identifier(str(uuid.uuid4()))
     book.set_title(title)
     book.set_language('ru')
-    book.add_author('Конвертер Бот')
 
-    # Собираем текст и картинки
+    # Добавляем обложку, если она есть
+    if cover_image:
+        book.set_cover("cover.jpg", cover_image)
+
+    # Контент
     content_html = "<html><body>"
     
-    # 1. Извлекаем картинки
+    # Обработка изображений из Word
     img_counter = 0
     for rel in doc.part.rels.values():
         if "image" in rel.target_ref:
             img_counter += 1
             img_name = f"img_{img_counter}.png"
-            epub_img = epub.EpubItem(
-                uid=f"img_{img_counter}", 
-                file_name=img_name, 
-                media_type="image/png", 
-                content=rel.target_part.blob
-            )
+            epub_img = epub.EpubItem(uid=f"img_{img_counter}", file_name=img_name, 
+                                     media_type="image/png", content=rel.target_part.blob)
             book.add_item(epub_img)
-            content_html += f'<div style="text-align:center;"><img src="{img_name}" style="max-width:100%"/></div>'
+            content_html += f'<img src="{img_name}"/>'
 
-    # 2. Извлекаем текст с базовым форматированием
+    # Текст
     for para in doc.paragraphs:
         if para.text.strip():
             if para.style.name.startswith('Heading'):
@@ -72,57 +92,66 @@ def convert_docx_to_epub(docx_bytes, filename):
 
     content_html += "</body></html>"
 
-    # Создаем главу
     chapter = epub.EpubHtml(title=title, file_name='chapter.xhtml')
     chapter.content = content_html
     book.add_item(chapter)
 
-    # Настройка структуры EPUB
+    # Добавляем CSS
+    nav_css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=STYLE)
+    book.add_item(nav_css)
+    chapter.add_item(nav_css)
+
     book.spine = ['nav', chapter]
     book.add_item(epub.EpubNav())
     book.add_item(epub.EpubNcx())
 
-    # Записываем результат в память
     out = io.BytesIO()
     epub.write_epub(out, book, {})
     return out.getvalue()
 
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    # Сохраняем последнее присланное фото как обложку
+    photo = message.photo[-1]
+    file_info = await bot.get_file(photo.file_id)
+    downloaded_file = await bot.download_file(file_info.file_path)
+    user_data[message.from_user.id] = downloaded_file.read()
+    await message.reply("🖼 Обложка сохранена! Теперь пришлите файл .docx")
+
 @dp.message(F.document)
 async def handle_docx(message: Message):
     if not message.document.file_name.lower().endswith('.docx'):
-        await message.answer("❌ Ошибка: я принимаю только файлы .docx")
         return
 
-    status_msg = await message.answer("⌛ Читаю файл и создаю книгу...")
+    status_msg = await message.answer("⌛ Магия форматирования...")
     
     try:
-        # Скачиваем файл во временный буфер
         file_io = await bot.download(message.document.file_id)
-        docx_bytes = file_io.read()
+        cover = user_data.get(message.from_user.id) # Берем обложку, если пользователь её прислал ранее
         
-        # Конвертируем
-        epub_data = convert_docx_to_epub(docx_bytes, message.document.file_name)
+        epub_data = create_epub(file_io.read(), message.document.file_name, cover)
         
-        # Подготавливаем файл для отправки
         new_name = message.document.file_name.rsplit('.', 1)[0] + ".epub"
-        final_file = BufferedInputFile(epub_data, filename=new_name)
+        await message.answer_document(BufferedInputFile(epub_data, filename=new_name), caption="✨ Книга готова!")
         
-        await message.answer_document(document=final_file, caption="✅ Готово! Приятного чтения.")
+        # Очищаем обложку после использования
+        if message.from_user.id in user_data:
+            del user_data[message.from_user.id]
+            
         await status_msg.delete()
-        
     except Exception as e:
-        logging.error(f"Error: {e}")
-        await message.answer("🚀 Произошла ошибка при конвертации. Попробуйте другой файл.")
+        logging.error(e)
+        await message.answer("❌ Ошибка при создании книги.")
 
 @dp.message()
-async def welcome(message: Message):
-    await message.answer("Привет! Пришли мне файл в формате **.docx**, и я превращу его в **.epub** для твоей читалки.")
+async def start(message: Message):
+    await message.answer("📚 **Привет! Я сделаю твою книгу красивой.**\n\n"
+                         "1. Пришли картинку (это будет обложка).\n"
+                         "2. Пришли файл .docx.\n\n"
+                         "Если картинку не прислать, книга будет без обложки.")
 
 async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main())
