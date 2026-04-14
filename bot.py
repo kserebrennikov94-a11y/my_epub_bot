@@ -8,7 +8,7 @@ from docx import Document
 from ebooklib import epub
 
 # --- НАСТРОЙКИ ---
-TOKEN = "ВАШ_ТОКЕН_ИЗ_BOTFATHER"
+TOKEN = "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
