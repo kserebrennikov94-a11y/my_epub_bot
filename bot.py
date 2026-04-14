@@ -1,6 +1,5 @@
 import asyncio
 import html
-import imghdr
 import io
 import logging
 import os
@@ -267,13 +266,14 @@ def is_probable_subheading(text: str) -> bool:
 # 5. Formatting + images
 # ============================================================
 def detect_image_type(blob: bytes) -> Tuple[str, str]:
-    kind = imghdr.what(None, h=blob)
-    if kind == "jpeg":
+    if blob.startswith(b"\xff\xd8\xff"):
         return "jpg", "image/jpeg"
-    if kind == "png":
+    if blob.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png", "image/png"
-    if kind == "gif":
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
         return "gif", "image/gif"
+    if blob[:2] == b"BM":
+        return "bmp", "image/bmp"
     return "bin", "application/octet-stream"
 
 
