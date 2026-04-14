@@ -39,7 +39,7 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 # ============================================================
 # 2. Config
 # ============================================================
-TOKEN = "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo"
+TOKEN = os.environ.get("BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -647,8 +647,8 @@ async def handle_docx(message: Message):
 
 
 async def main() -> None:
-    if TOKEN == "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo":
-        raise RuntimeError("Укажи BOT_TOKEN в переменной окружения или в коде.")
+   if not TOKEN:
+    raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
     await dp.start_polling(bot)
 
 
