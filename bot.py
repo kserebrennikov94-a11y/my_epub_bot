@@ -56,7 +56,6 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# temporary cover storage by user id
 user_data: Dict[int, bytes] = {}
 
 STYLE = """
@@ -76,7 +75,6 @@ h1, h2, h3 {
 h1 { font-size: 1.45em; }
 h2 { font-size: 1.20em; }
 h3 { font-size: 1.05em; }
-
 p {
     text-indent: 1.5em;
     margin: 0 0 0.45em 0;
@@ -141,7 +139,7 @@ def iter_block_items(parent):
 
 
 # ============================================================
-# 4. Cleanup helpers tuned for your reconstructed DOCX
+# 4. Cleanup helpers
 # ============================================================
 JUNK_CHARS_RE = re.compile(r"[□■◆◊▪¤�]")
 MULTISPACE_RE = re.compile(r"[ \t]{2,}")
@@ -408,7 +406,14 @@ def build_clean_toc_page(doc: Document) -> str:
 
 
 def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Optional[bytes] = None) -> bytes:
-    doc = Document(io.BytesIO(docx_bytes))
+    if not docx_bytes:
+        raise RuntimeError("DOCX-файл пустой")
+
+    try:
+        doc = Document(io.BytesIO(docx_bytes))
+    except Exception as e:
+        raise RuntimeError(f"Не удалось прочитать DOCX: {e}")
+
     book = epub.EpubBook()
 
     title = filename.rsplit(".", 1)[0]
@@ -567,8 +572,14 @@ async def handle_docx(message: Message):
 
     try:
         file_info = await bot.get_file(message.document.file_id)
-        downloaded = await bot.download_file(file_info.file_path)
-        docx_bytes = downloaded.read()
+
+        buffer = io.BytesIO()
+        await bot.download_file(file_info.file_path, destination=buffer)
+        buffer.seek(0)
+        docx_bytes = buffer.getvalue()
+
+        if not docx_bytes:
+            raise RuntimeError("Telegram вернул пустой файл")
 
         cover = user_data.get(message.from_user.id)
         epub_data = create_epub_for_karabanova(docx_bytes, message.document.file_name, cover)
