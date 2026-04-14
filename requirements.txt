@@ -1,4 +1,4 @@
 aiogram
 python-docx
-ebooklib
+ebooklib==0.20
 lxml
