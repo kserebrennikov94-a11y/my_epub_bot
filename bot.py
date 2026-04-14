@@ -40,7 +40,7 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 # ============================================================
 # 2. Config
 # ============================================================
-TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
+TOKEN = os.environ.get("BOT_TOKEN", "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -647,7 +647,7 @@ async def handle_docx(message: Message):
 
 
 async def main() -> None:
-    if TOKEN == "ВАШ_ТОКЕН_ОТ_BOTFATHER":
+    if TOKEN == "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo":
         raise RuntimeError("Укажи BOT_TOKEN в переменной окружения или в коде.")
     await dp.start_polling(bot)
 
