@@ -37,6 +37,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         return
 
 
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", "10000"))
     print(f"HTTP stub starting on port {port}", flush=True)
@@ -60,6 +61,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Временное хранилище обложек
 user_data: Dict[int, bytes] = {}
 
 STYLE = """
@@ -77,7 +79,7 @@ h1, h2, h3 {
     line-height: 1.2;
 }
 h1 { font-size: 1.45em; }
-h2 { font-size: 1.2em; }
+h2 { font-size: 1.20em; }
 h3 { font-size: 1.05em; }
 p {
     text-indent: 1.5em;
@@ -116,27 +118,12 @@ th, td {
 }
 """
 
-INVALID_XML_RE = re.compile(
-    "[" "\x00-\x08" "\x0B\x0C" "\x0E-\x1F" "]"
-)
-JUNK_CHARS_RE = re.compile(r"[□■◆◊▪¤�]")
+INVALID_XML_RE = re.compile("[" "\x00-\x08" "\x0B\x0C" "\x0E-\x1F" "]")
 MULTISPACE_RE = re.compile(r"[ \t]{2,}")
-
-BROKEN_REPLACEMENTS = {
-    "Bыготского": "Выготского",
-    "Bопросы": "Вопросы",
-    "Cписок": "Список",
-    "Cодержание": "Содержание",
-    "Пpeдисловие": "Предисловие",
-    "Лeкция": "Лекция",
-    "З. Фрейда": "3. Фрейда",
-    "Лекция 12 Младенческий возраст": "Лекция 12. Младенческий возраст",
-    "Лекция 13 Ранний возраст": "Лекция 13. Ранний возраст",
-    "Лекция 14Дошкольный возраст": "Лекция 14. Дошкольный возраст",
-    "Лекция 16 Подростковый возраст": "Лекция 16. Подростковый возраст",
-    "Лекция 17 Зрелые возрасты": "Лекция 17. Зрелые возрасты",
-    "Вопросы для самопроверкиСписок литературы": "Вопросы для самопроверки\nСписок литературы",
-}
+PAGE_MARK_RE = re.compile(r"^\[?\s*Стр\.?\s*\d+\s*\]?$", re.IGNORECASE)
+SUBSECTION_RE = re.compile(r"^\d+\.\d+([\.]|\s)")
+LECTURE_RE = re.compile(r"^(Лекция|Lecture|Chapter)\s*\d+", re.IGNORECASE)
+FIGURE_RE = re.compile(r"^(Рис\.|Рисунок|Схема|Таблица|Figure|Fig\.|Table)\s*\d+", re.IGNORECASE)
 
 
 # ============================================================
@@ -148,55 +135,15 @@ def sanitize_xml_text(text: str) -> str:
     return INVALID_XML_RE.sub("", text)
 
 
+
 def normalize_whitespace(text: str) -> str:
     text = text.replace("\xa0", " ")
     text = text.replace("\u00ad", "")
     text = text.replace("\u200b", "")
+    text = sanitize_xml_text(text)
     text = MULTISPACE_RE.sub(" ", text)
     return text.strip()
 
-
-def clean_common_ocr_noise(text: str) -> str:
-    if not text:
-        return ""
-
-    text = sanitize_xml_text(text)
-    text = JUNK_CHARS_RE.sub("", text)
-    text = text.replace(" ,", ",")
-    text = text.replace(" .", ".")
-    text = text.replace(" :", ":")
-    text = text.replace(" ;", ";")
-    text = text.replace("( ", "(")
-    text = text.replace(" )", ")")
-
-    for bad, good in BROKEN_REPLACEMENTS.items():
-        text = text.replace(bad, good)
-
-    return normalize_whitespace(text)
-
-
-def clean_heading_text(text: str) -> str:
-    text = clean_common_ocr_noise(text)
-    text = re.sub(r"^[\W_]+", "", text)
-    text = re.sub(r"[\W_]+$", "", text)
-    text = re.sub(r"\s+[A-Za-zА-Яа-я]$", "", text)
-    text = re.sub(r"^Лекция\s+(\d+)\s*[\.-]?\s*", lambda m: f"Лекция {m.group(1)}. ", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text
-
-
-def is_probable_main_heading(text: str) -> bool:
-    text = (text or "").strip()
-    if not text:
-        return False
-    if text in {"Содержание", "Предисловие", "Список литературы", "Вопросы для самопроверки"}:
-        return True
-    return bool(re.match(r"^Лекция\s+\d+", text))
-
-
-def is_probable_subheading(text: str) -> bool:
-    text = (text or "").strip()
-    return bool(re.match(r"^\d+\.\d+([.]|\s)", text))
 
 
 def iter_block_items(parent):
@@ -212,6 +159,7 @@ def iter_block_items(parent):
             yield Table(child, parent)
 
 
+
 def detect_image_type(blob: bytes) -> Tuple[str, str]:
     if blob.startswith(b"\xff\xd8\xff"):
         return "jpg", "image/jpeg"
@@ -222,6 +170,7 @@ def detect_image_type(blob: bytes) -> Tuple[str, str]:
     if blob[:2] == b"BM":
         return "bmp", "image/bmp"
     return "bin", "application/octet-stream"
+
 
 
 def collect_images(book: epub.EpubBook, doc: Document) -> Dict[str, Tuple[str, str]]:
@@ -250,6 +199,7 @@ def collect_images(book: epub.EpubBook, doc: Document) -> Dict[str, Tuple[str, s
     return image_map
 
 
+
 def extract_inline_images(paragraph: Paragraph, image_map: Dict[str, Tuple[str, str]]) -> List[str]:
     xml = paragraph._p.xml
     found: List[str] = []
@@ -259,35 +209,76 @@ def extract_inline_images(paragraph: Paragraph, image_map: Dict[str, Tuple[str, 
     return found
 
 
+
 def has_page_break(paragraph: Paragraph) -> bool:
     xml = paragraph._p.xml
     return ('w:type="page"' in xml) or ("<w:br" in xml and 'type="page"' in xml)
 
 
+
+def is_heading_paragraph(paragraph: Paragraph, text: str) -> Optional[int]:
+    style_name = (paragraph.style.name or "").strip().lower() if paragraph.style else ""
+
+    style_map = {
+        "heading 1": 1,
+        "heading 2": 2,
+        "heading 3": 3,
+        "заголовок 1": 1,
+        "заголовок 2": 2,
+        "заголовок 3": 3,
+        "title": 1,
+        "subtitle": 2,
+        "название": 1,
+        "подзаголовок": 2,
+    }
+    if style_name in style_map:
+        return style_map[style_name]
+
+    if not text:
+        return None
+
+    # Heuristics for generic DOCX
+    if LECTURE_RE.match(text):
+        return 1
+    if SUBSECTION_RE.match(text):
+        return 2
+    if FIGURE_RE.match(text):
+        return 3
+
+    # Short centered bold lines often act as headings
+    is_center = paragraph.alignment == 1 or str(paragraph.alignment).endswith("CENTER (1)")
+    bold_ratio = 0
+    total = 0
+    for run in paragraph.runs:
+        rtxt = run.text or ""
+        total += len(rtxt)
+        if run.bold:
+            bold_ratio += len(rtxt)
+    if total and len(text) <= 120 and (bold_ratio / total) > 0.6:
+        if is_center:
+            return 1
+        return 2
+
+    return None
+
+
+
 def render_runs(paragraph: Paragraph) -> str:
     parts: List[str] = []
-
     for run in paragraph.runs:
-        txt = run.text or ""
+        txt = normalize_whitespace(run.text or "")
         if not txt:
             continue
-
-        txt = clean_common_ocr_noise(txt)
-        txt = sanitize_xml_text(txt)
         txt = html.escape(txt)
-        if not txt:
-            continue
-
         if run.bold:
             txt = f"<strong>{txt}</strong>"
         if run.italic:
             txt = f"<em>{txt}</em>"
         if run.underline:
             txt = f"<u>{txt}</u>"
-
         parts.append(txt)
-
     return "".join(parts).strip()
+
 
 
 def paragraph_alignment_class(paragraph: Paragraph) -> str:
@@ -297,53 +288,126 @@ def paragraph_alignment_class(paragraph: Paragraph) -> str:
     return ""
 
 
+
+def is_noise_paragraph(paragraph: Paragraph, text: str) -> bool:
+    if not text:
+        return True
+
+    # Generic removal of imported page markers
+    if PAGE_MARK_RE.match(text):
+        return True
+
+    # Repeated tiny gray header/footer-like lines
+    if len(text) < 100:
+        style_name = (paragraph.style.name or "").lower() if paragraph.style else ""
+        if "header" in style_name or "footer" in style_name or "колонтитул" in style_name:
+            return True
+
+        small_font_count = 0
+        run_count = 0
+        for run in paragraph.runs:
+            if run.text and run.text.strip():
+                run_count += 1
+                size = run.font.size.pt if run.font.size else None
+                color = run.font.color.rgb if run.font.color and run.font.color.rgb else None
+                if size is not None and size <= 9:
+                    small_font_count += 1
+                if color is not None and str(color).upper() in {"808080", "7F7F7F", "999999", "A6A6A6"}:
+                    return True
+        if run_count and small_font_count == run_count and LECTURE_RE.match(text):
+            return True
+
+    return False
+
+
+
 def table_to_html(table: Table) -> str:
     rows_html: List[str] = []
-
     for row in table.rows:
         cell_html: List[str] = []
         for cell in row.cells:
             paras: List[str] = []
             for p in cell.paragraphs:
-                text = render_runs(p) or html.escape(clean_common_ocr_noise(p.text or ""))
+                text = render_runs(p) or html.escape(normalize_whitespace(p.text or ""))
                 text = sanitize_xml_text(text).strip()
                 if text:
                     paras.append(text)
-
             value = "<br/>".join(paras) if paras else "&nbsp;"
             cell_html.append(f"<td>{value}</td>")
-
         rows_html.append("<tr>" + "".join(cell_html) + "</tr>")
-
     return "<table>" + "".join(rows_html) + "</table>"
 
 
 # ============================================================
-# 4. Stable EPUB builder
+# 4. Generic DOCX -> EPUB
 # ============================================================
-def create_epub_for_karabanova_from_path(
-    docx_path: str,
-    filename: str,
-    cover_image: Optional[bytes] = None
-) -> bytes:
+def build_book_html(doc: Document, image_map: Dict[str, Tuple[str, str]], title: str) -> str:
+    body_parts: List[str] = []
+    title_added = False
+
+    for block in iter_block_items(doc):
+        if isinstance(block, Paragraph):
+            text = normalize_whitespace(block.text or "")
+            inline_images = extract_inline_images(block, image_map)
+
+            if is_noise_paragraph(block, text) and not inline_images:
+                continue
+
+            if has_page_break(block):
+                body_parts.append('<div class="pagebreak"></div>')
+
+            if not text and not inline_images:
+                continue
+
+            heading_level = is_heading_paragraph(block, text)
+
+            if heading_level == 1:
+                body_parts.append(f"<h1>{html.escape(text)}</h1>")
+                title_added = True
+            elif heading_level == 2:
+                body_parts.append(f"<h2>{html.escape(text)}</h2>")
+            elif heading_level == 3:
+                body_parts.append(f'<p class="caption">{html.escape(text)}</p>')
+            else:
+                rendered = render_runs(block)
+                if not rendered and text:
+                    rendered = html.escape(text)
+                if rendered:
+                    extra_class = paragraph_alignment_class(block)
+                    class_attr = f' class="{extra_class}"' if extra_class else ""
+                    body_parts.append(f"<p{class_attr}>{rendered}</p>")
+
+            for img_name in inline_images:
+                body_parts.append(f'<img src="{html.escape(img_name)}" alt="Иллюстрация"/>')
+
+        elif isinstance(block, Table):
+            body_parts.append(table_to_html(block))
+
+    if not title_added:
+        body_parts.insert(0, f"<h1>{html.escape(title)}</h1>")
+
+    if not body_parts:
+        body_parts = ["<p>Документ пуст.</p>"]
+
+    return "".join(body_parts)
+
+
+
+def create_epub_from_docx_path(docx_path: str, filename: str, cover_image: Optional[bytes] = None) -> bytes:
     if not os.path.exists(docx_path):
         raise RuntimeError("Временный DOCX-файл не найден")
-
     if os.path.getsize(docx_path) == 0:
         raise RuntimeError("DOCX-файл пустой")
-
     if not zipfile.is_zipfile(docx_path):
         raise RuntimeError("Файл не является корректным DOCX (ZIP-архивом)")
 
     doc = Document(docx_path)
-
     book = epub.EpubBook()
-    title = filename.rsplit(".", 1)[0]
+    title = filename.rsplit('.', 1)[0]
 
     book.set_identifier(str(uuid.uuid4()))
     book.set_title(title)
     book.set_language("ru")
-    book.add_author("О. А. Карабанова")
 
     if cover_image:
         book.set_cover("cover.jpg", cover_image)
@@ -357,60 +421,13 @@ def create_epub_for_karabanova_from_path(
     book.add_item(nav_css)
 
     image_map = collect_images(book, doc)
-
-    body_parts: List[str] = [f"<h1>{html.escape(title)}</h1>"]
-    skipping_raw_toc = False
-
-    for block in iter_block_items(doc):
-        if isinstance(block, Paragraph):
-            raw_text = block.text or ""
-            text = normalize_whitespace(clean_common_ocr_noise(raw_text))
-            heading_text = clean_heading_text(text)
-            inline_images = extract_inline_images(block, image_map)
-
-            if text == "Содержание":
-                skipping_raw_toc = True
-                continue
-
-            if skipping_raw_toc:
-                if text == "Предисловие":
-                    skipping_raw_toc = False
-                else:
-                    continue
-
-            if has_page_break(block):
-                body_parts.append('<div class="pagebreak"></div>')
-
-            if not text and not inline_images:
-                continue
-
-            if is_probable_main_heading(heading_text):
-                body_parts.append(f"<h1>{html.escape(heading_text)}</h1>")
-            elif is_probable_subheading(heading_text):
-                body_parts.append(f"<h2>{html.escape(heading_text)}</h2>")
-            elif re.match(r"^(Рис\.|Рисунок|Схема|Таблица)\s*\d+", heading_text):
-                body_parts.append(f'<p class="caption">{html.escape(heading_text)}</p>')
-            else:
-                rendered = render_runs(block)
-                if not rendered and heading_text:
-                    rendered = html.escape(sanitize_xml_text(heading_text))
-
-                if rendered:
-                    extra_class = paragraph_alignment_class(block)
-                    class_attr = f' class="{extra_class}"' if extra_class else ""
-                    body_parts.append(f"<p{class_attr}>{rendered}</p>")
-
-            for img_name in inline_images:
-                body_parts.append(f'<img src="{html.escape(img_name)}" alt="Иллюстрация"/>')
-
-        elif isinstance(block, Table):
-            body_parts.append(table_to_html(block))
+    body_html = build_book_html(doc, image_map, title)
 
     chapter = epub.EpubHtml(title=title, file_name="book.xhtml", lang="ru")
     chapter.set_content(
         f"""<html>
 <head><title>{html.escape(title)}</title></head>
-<body>{''.join(body_parts)}</body>
+<body>{body_html}</body>
 </html>""".encode("utf-8")
     )
     chapter.add_item(nav_css)
@@ -427,10 +444,8 @@ def create_epub_for_karabanova_from_path(
         epub.write_epub(epub_path, book, {})
         with open(epub_path, "rb") as f:
             epub_bytes = f.read()
-
         if not epub_bytes:
             raise RuntimeError("EPUB получился пустым")
-
         return epub_bytes
     finally:
         if os.path.exists(epub_path):
@@ -445,7 +460,7 @@ async def start_cmd(message: Message):
     await message.answer(
         "👋 Привет!\n\n"
         "Пришли обложку, если нужна, а затем DOCX.\n"
-        "Я соберу EPUB под твою восстановленную книгу."
+        "Я соберу EPUB для обычного DOCX: с текстом, таблицами и изображениями."
     )
 
 
@@ -474,7 +489,6 @@ async def handle_docx(message: Message):
         docx_bytes = buffer.getvalue()
 
         logger.info("Downloaded file size: %s bytes", len(docx_bytes))
-
         if not docx_bytes:
             raise RuntimeError("Telegram вернул пустой файл")
 
@@ -482,17 +496,10 @@ async def handle_docx(message: Message):
             tmp.write(docx_bytes)
             temp_path = tmp.name
 
-        logger.info("Temporary DOCX saved to: %s", temp_path)
-        logger.info("Temporary DOCX size on disk: %s bytes", os.path.getsize(temp_path))
-
         cover = user_data.get(message.from_user.id)
-        epub_data = create_epub_for_karabanova_from_path(
-            temp_path,
-            message.document.file_name,
-            cover,
-        )
+        epub_data = create_epub_from_docx_path(temp_path, message.document.file_name, cover)
 
-        new_name = message.document.file_name.rsplit(".", 1)[0] + ".epub"
+        new_name = message.document.file_name.rsplit('.', 1)[0] + ".epub"
         await message.answer_document(
             BufferedInputFile(epub_data, filename=new_name),
             caption=f"📚 Готово: {new_name}",
