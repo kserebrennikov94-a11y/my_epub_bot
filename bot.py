@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional, Tuple
 
@@ -409,6 +410,9 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
     if not docx_bytes:
         raise RuntimeError("DOCX-файл пустой")
 
+    if not zipfile.is_zipfile(io.BytesIO(docx_bytes)):
+        raise RuntimeError("Файл не является корректным DOCX (ZIP-архивом)")
+
     try:
         doc = Document(io.BytesIO(docx_bytes))
     except Exception as e:
@@ -548,8 +552,7 @@ async def start_cmd(message: Message):
     await message.answer(
         "👋 Привет!\n\n"
         "Пришли обложку, если нужна, а затем DOCX.\n"
-        "Я соберу EPUB под твою восстановленную книгу: "
-        "с более чистыми заголовками, содержанием, таблицами и картинками."
+        "Я соберу EPUB под твою восстановленную книгу."
     )
 
 
@@ -571,15 +574,18 @@ async def handle_docx(message: Message):
     status_msg = await message.answer("🚀 Принял файл, начинаю сборку EPUB...")
 
     try:
-        file_info = await bot.get_file(message.document.file_id)
-
         buffer = io.BytesIO()
-        await bot.download_file(file_info.file_path, destination=buffer)
+        await bot.download(message.document, destination=buffer)
         buffer.seek(0)
         docx_bytes = buffer.getvalue()
 
+        logger.info("Downloaded file size: %s bytes", len(docx_bytes))
+
         if not docx_bytes:
             raise RuntimeError("Telegram вернул пустой файл")
+
+        if not zipfile.is_zipfile(io.BytesIO(docx_bytes)):
+            raise RuntimeError("Загруженный файл не является корректным DOCX")
 
         cover = user_data.get(message.from_user.id)
         epub_data = create_epub_for_karabanova(docx_bytes, message.document.file_name, cover)
