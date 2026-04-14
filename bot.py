@@ -2,14 +2,32 @@ import asyncio
 import logging
 import io
 import uuid
+import threading
+import http.server
+import socketserver
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BufferedInputFile
 from docx import Document
 from ebooklib import epub
 
-# --- НАСТРОЙКИ ---
-TOKEN = "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo"
+# --- СЕРВЕР-ЗАГЛУШКА ДЛЯ RENDER ---
+def run_dummy_server():
+    # Render передает порт в переменной окружения PORT, по умолчанию 10000
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    handler = http.server.SimpleHTTPRequestHandler
+    # Разрешаем повторное использование порта
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        logging.info(f"Слушаю порт {port} для Render...")
+        httpd.serve_forever()
 
+# Запускаем сервер в фоновом потоке
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# --- ДАЛЕЕ ВАШ КОД БОТА (TOKEN, dp, функции и т.д.) ---
+TOKEN = "8320222564:AAHJ7gvgHGyj8ZBrGsF6d9L-1hvRby0XxXo"
+# ... и так далее
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
