@@ -116,17 +116,9 @@ th, td {
 }
 """
 
-# ============================================================
-# 3. Helpers
-# ============================================================
 INVALID_XML_RE = re.compile(
-    "[" 
-    "\x00-\x08"
-    "\x0B\x0C"
-    "\x0E-\x1F"
-    "]"
+    "[" "\x00-\x08" "\x0B\x0C" "\x0E-\x1F" "]"
 )
-
 JUNK_CHARS_RE = re.compile(r"[□■◆◊▪¤�]")
 MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 
@@ -147,11 +139,13 @@ BROKEN_REPLACEMENTS = {
 }
 
 
+# ============================================================
+# 3. Helpers
+# ============================================================
 def sanitize_xml_text(text: str) -> str:
     if not text:
         return ""
-    text = INVALID_XML_RE.sub("", text)
-    return text
+    return INVALID_XML_RE.sub("", text)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -202,7 +196,7 @@ def is_probable_main_heading(text: str) -> bool:
 
 def is_probable_subheading(text: str) -> bool:
     text = (text or "").strip()
-    return bool(re.match(r"^\d+\.\d+([\.]|\s)", text))
+    return bool(re.match(r"^\d+\.\d+([.]|\s)", text))
 
 
 def iter_block_items(parent):
@@ -310,7 +304,6 @@ def table_to_html(table: Table) -> str:
         cell_html: List[str] = []
         for cell in row.cells:
             paras: List[str] = []
-
             for p in cell.paragraphs:
                 text = render_runs(p) or html.escape(clean_common_ocr_noise(p.text or ""))
                 text = sanitize_xml_text(text).strip()
@@ -326,7 +319,7 @@ def table_to_html(table: Table) -> str:
 
 
 # ============================================================
-# 4. Stable one-file EPUB builder
+# 4. Stable EPUB builder
 # ============================================================
 def create_epub_for_karabanova_from_path(
     docx_path: str,
@@ -342,14 +335,11 @@ def create_epub_for_karabanova_from_path(
     if not zipfile.is_zipfile(docx_path):
         raise RuntimeError("Файл не является корректным DOCX (ZIP-архивом)")
 
-    try:
-        doc = Document(docx_path)
-    except Exception as e:
-        raise RuntimeError(f"Не удалось прочитать DOCX: {e}")
+    doc = Document(docx_path)
 
     book = epub.EpubBook()
-
     title = filename.rsplit(".", 1)[0]
+
     book.set_identifier(str(uuid.uuid4()))
     book.set_title(title)
     book.set_language("ru")
@@ -368,9 +358,7 @@ def create_epub_for_karabanova_from_path(
 
     image_map = collect_images(book, doc)
 
-    body_parts: List[str] = []
-    body_parts.append(f"<h1>{html.escape(title)}</h1>")
-
+    body_parts: List[str] = [f"<h1>{html.escape(title)}</h1>"]
     skipping_raw_toc = False
 
     for block in iter_block_items(doc):
@@ -398,13 +386,10 @@ def create_epub_for_karabanova_from_path(
 
             if is_probable_main_heading(heading_text):
                 body_parts.append(f"<h1>{html.escape(heading_text)}</h1>")
-
             elif is_probable_subheading(heading_text):
                 body_parts.append(f"<h2>{html.escape(heading_text)}</h2>")
-
             elif re.match(r"^(Рис\.|Рисунок|Схема|Таблица)\s*\d+", heading_text):
                 body_parts.append(f'<p class="caption">{html.escape(heading_text)}</p>')
-
             else:
                 rendered = render_runs(block)
                 if not rendered and heading_text:
@@ -421,38 +406,25 @@ def create_epub_for_karabanova_from_path(
         elif isinstance(block, Table):
             body_parts.append(table_to_html(block))
 
-    if not body_parts:
-        body_parts = ["<p>Документ пуст.</p>"]
-
-    chapter = epub.EpubHtml(
-        title=title,
-        file_name="text/book.xhtml",
-        lang="ru",
+    chapter = epub.EpubHtml(title=title, file_name="book.xhtml", lang="ru")
+    chapter.set_content(
+        f"""<html>
+<head><title>{html.escape(title)}</title></head>
+<body>{''.join(body_parts)}</body>
+</html>""".encode("utf-8")
     )
-    chapter.content = f"""<?xml version='1.0' encoding='utf-8'?>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-  <title>{html.escape(title)}</title>
-</head>
-<body>
-{''.join(body_parts)}
-</body>
-</html>
-"""
     chapter.add_item(nav_css)
 
     book.add_item(chapter)
     book.toc = (chapter,)
-    book.add_item(epub.EpubNav())
     book.add_item(epub.EpubNcx())
-    book.spine = ["nav", chapter]
+    book.spine = [chapter]
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".epub") as tmp_epub:
         epub_path = tmp_epub.name
 
     try:
         epub.write_epub(epub_path, book, {})
-
         with open(epub_path, "rb") as f:
             epub_bytes = f.read()
 
@@ -493,7 +465,6 @@ async def handle_docx(message: Message):
         return
 
     status_msg = await message.answer("🚀 Принял файл, начинаю сборку EPUB...")
-
     temp_path = None
 
     try:
@@ -534,7 +505,6 @@ async def handle_docx(message: Message):
         tb = traceback.format_exc()
         logger.error(tb)
         short_tb = tb[-3500:]
-
         await message.answer(
             "❌ Ошибка конвертации:\n"
             f"{exc}\n\n"
