@@ -4,17 +4,15 @@ import io
 import logging
 import os
 import re
-import socketserver
 import threading
 import uuid
-import http.server
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import BufferedInputFile, Message
 from docx import Document
 from docx.document import Document as DocxDocument
-from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table
@@ -23,14 +21,23 @@ from ebooklib import epub
 
 
 # ============================================================
-# 1. Dummy server for Render
+# 1. Render Web Service HTTP stub
 # ============================================================
-def run_dummy_server() -> None:
-    port = int(os.environ.get("PORT", 10000))
-    handler = http.server.SimpleHTTPRequestHandler
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        httpd.serve_forever()
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return
+
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
@@ -40,6 +47,8 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 # 2. Config
 # ============================================================
 TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -47,7 +56,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# temporary storage for covers
+# temporary cover storage by user id
 user_data: Dict[int, bytes] = {}
 
 STYLE = """
@@ -60,32 +69,28 @@ body {
 }
 h1, h2, h3 {
     text-align: center;
-    margin-top: 1.0em;
+    margin-top: 1em;
     margin-bottom: 0.7em;
     line-height: 1.2;
 }
 h1 { font-size: 1.45em; }
-h2 { font-size: 1.2em; }
+h2 { font-size: 1.20em; }
 h3 { font-size: 1.05em; }
+
 p {
     text-indent: 1.5em;
     margin: 0 0 0.45em 0;
-}
-p.no-indent {
-    text-indent: 0;
 }
 p.center {
     text-indent: 0;
     text-align: center;
 }
-.small-gap {
-    margin-top: 0.2em;
-}
-.large-gap {
-    margin-top: 1em;
-}
-.pagebreak {
-    page-break-before: always;
+p.caption {
+    text-indent: 0;
+    text-align: center;
+    font-style: italic;
+    margin-top: 0.35em;
+    margin-bottom: 0.7em;
 }
 img {
     display: block;
@@ -104,12 +109,8 @@ th, td {
     padding: 6px;
     vertical-align: top;
 }
-.caption {
-    text-align: center;
-    text-indent: 0;
-    font-style: italic;
-    margin-top: 0.35em;
-    margin-bottom: 0.7em;
+.pagebreak {
+    page-break-before: always;
 }
 .toc-title {
     text-align: center;
@@ -120,19 +121,13 @@ th, td {
     text-indent: 0;
     margin: 0.15em 0;
 }
-hr {
-    border: none;
-    border-top: 1px solid #999;
-    margin: 1em 0;
-}
 """
 
 
 # ============================================================
-# 3. Helpers for reading DOCX in order
+# 3. DOCX traversal helpers
 # ============================================================
 def iter_block_items(parent):
-    """Yield Paragraph and Table objects in document order."""
     if isinstance(parent, DocxDocument):
         parent_elm = parent.element.body
     else:
@@ -146,17 +141,25 @@ def iter_block_items(parent):
 
 
 # ============================================================
-# 4. Text cleanup tuned for the reconstructed book
+# 4. Cleanup helpers tuned for your reconstructed DOCX
 # ============================================================
 JUNK_CHARS_RE = re.compile(r"[□■◆◊▪¤�]")
 MULTISPACE_RE = re.compile(r"[ \t]{2,}")
-BROKEN_LATIN_REPLACEMENTS = {
+
+BROKEN_REPLACEMENTS = {
     "Bыготского": "Выготского",
     "Bопросы": "Вопросы",
     "Cписок": "Список",
     "Cодержание": "Содержание",
     "Пpeдисловие": "Предисловие",
     "Лeкция": "Лекция",
+    "З. Фрейда": "3. Фрейда",
+    "Лекция 12 Младенческий возраст": "Лекция 12. Младенческий возраст",
+    "Лекция 13 Ранний возраст": "Лекция 13. Ранний возраст",
+    "Лекция 14Дошкольный возраст": "Лекция 14. Дошкольный возраст",
+    "Лекция 16 Подростковый возраст": "Лекция 16. Подростковый возраст",
+    "Лекция 17 Зрелые возрасты": "Лекция 17. Зрелые возрасты",
+    "Вопросы для самопроверкиСписок литературы": "Вопросы для самопроверки\nСписок литературы",
 }
 
 
@@ -166,7 +169,6 @@ def normalize_whitespace(text: str) -> str:
     text = text.replace("\u200b", "")
     text = MULTISPACE_RE.sub(" ", text)
     return text.strip()
-
 
 
 def clean_common_ocr_noise(text: str) -> str:
@@ -181,35 +183,16 @@ def clean_common_ocr_noise(text: str) -> str:
     text = text.replace("( ", "(")
     text = text.replace(" )", ")")
 
-    for bad, good in BROKEN_LATIN_REPLACEMENTS.items():
-        text = text.replace(bad, good)
-
-    # specific fixes for the reconstructed book
-    replacements = {
-        "З. Фрейда": "3. Фрейда",
-        "Лекция 12 Младенческий возраст": "Лекция 12. Младенческий возраст",
-        "Лекция 13 Ранний возраст": "Лекция 13. Ранний возраст",
-        "Лекция 14Дошкольный возраст": "Лекция 14. Дошкольный возраст",
-        "Лекция 16 Подростковый возраст": "Лекция 16. Подростковый возраст",
-        "Лекция 17 Зрелые возрасты": "Лекция 17. Зрелые возрасты",
-        "Вопросы для самопроверкиСписок литературы": "Вопросы для самопроверки\nСписок литературы",
-    }
-    for bad, good in replacements.items():
+    for bad, good in BROKEN_REPLACEMENTS.items():
         text = text.replace(bad, good)
 
     return normalize_whitespace(text)
 
 
-
 def looks_like_garbage(text: str) -> bool:
-    if not text:
-        return False
-
-    stripped = re.sub(r"\s+", "", text)
+    stripped = re.sub(r"\s+", "", text or "")
     if len(stripped) < 4:
         return False
-
-    # too many repeated same characters, like жжжжжжх
     if re.search(r"(.)\1{4,}", stripped):
         return True
 
@@ -218,52 +201,35 @@ def looks_like_garbage(text: str) -> bool:
         return False
 
     unique_ratio = len(set(letters)) / max(1, len(letters))
-    if len(letters) >= 8 and unique_ratio < 0.25:
-        return True
-
-    return False
-
+    return len(letters) >= 8 and unique_ratio < 0.25
 
 
 def clean_heading_text(text: str) -> str:
     text = clean_common_ocr_noise(text)
-
-    # Remove random leading/trailing garbage symbols or single orphan letters
     text = re.sub(r"^[\W_]+", "", text)
     text = re.sub(r"[\W_]+$", "", text)
     text = re.sub(r"\s+[A-Za-zА-Яа-я]$", "", text)
-
-    # Normalize lecture headings
     text = re.sub(r"^Лекция\s+(\d+)\s*[\.-]?\s*", lambda m: f"Лекция {m.group(1)}. ", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
-
     return text
 
 
-
 def is_probable_main_heading(text: str) -> bool:
-    text = text.strip()
+    text = (text or "").strip()
     if not text:
         return False
     if text in {"Содержание", "Предисловие", "Список литературы", "Вопросы для самопроверки"}:
         return True
-    if re.match(r"^Лекция\s+\d+", text):
-        return True
-    return False
-
+    return bool(re.match(r"^Лекция\s+\d+", text))
 
 
 def is_probable_subheading(text: str) -> bool:
-    text = text.strip()
-    if re.match(r"^\d+\.\d+\.", text):
-        return True
-    if re.match(r"^\d+\.\d+\s", text):
-        return True
-    return False
+    text = (text or "").strip()
+    return bool(re.match(r"^\d+\.\d+([\.]|\s)", text))
 
 
 # ============================================================
-# 5. Formatting + images
+# 5. Images and tables
 # ============================================================
 def detect_image_type(blob: bytes) -> Tuple[str, str]:
     if blob.startswith(b"\xff\xd8\xff"):
@@ -275,7 +241,6 @@ def detect_image_type(blob: bytes) -> Tuple[str, str]:
     if blob[:2] == b"BM":
         return "bmp", "image/bmp"
     return "bin", "application/octet-stream"
-
 
 
 def collect_images(book: epub.EpubBook, doc: Document) -> Dict[str, Tuple[str, str]]:
@@ -304,7 +269,6 @@ def collect_images(book: epub.EpubBook, doc: Document) -> Dict[str, Tuple[str, s
     return image_map
 
 
-
 def extract_inline_images(paragraph: Paragraph, image_map: Dict[str, Tuple[str, str]]) -> List[str]:
     xml = paragraph._p.xml
     found: List[str] = []
@@ -314,11 +278,9 @@ def extract_inline_images(paragraph: Paragraph, image_map: Dict[str, Tuple[str, 
     return found
 
 
-
 def has_page_break(paragraph: Paragraph) -> bool:
     xml = paragraph._p.xml
-    return 'w:type="page"' in xml or "<w:br" in xml and 'type="page"' in xml
-
+    return ('w:type="page"' in xml) or ("<w:br" in xml and 'type="page"' in xml)
 
 
 def render_runs(paragraph: Paragraph) -> str:
@@ -346,46 +308,44 @@ def render_runs(paragraph: Paragraph) -> str:
     return "".join(parts).strip()
 
 
-
 def paragraph_alignment_class(paragraph: Paragraph) -> str:
-    try:
-        align = paragraph.alignment
-    except Exception:
-        align = None
-
-    # 1 == center in python-docx enum, but keeping it tolerant
+    align = paragraph.alignment
     if str(align).endswith("CENTER (1)") or align == 1:
         return "center"
     return ""
 
 
-
 def table_to_html(table: Table) -> str:
     rows_html: List[str] = []
+
     for row in table.rows:
         cell_html: List[str] = []
+
         for cell in row.cells:
             paras: List[str] = []
+
             for p in cell.paragraphs:
                 text = render_runs(p) or html.escape(clean_common_ocr_noise(p.text or ""))
                 text = text.strip()
                 if text:
                     paras.append(text)
+
             value = "<br/>".join(paras) if paras else "&nbsp;"
             cell_html.append(f"<td>{value}</td>")
+
         rows_html.append("<tr>" + "".join(cell_html) + "</tr>")
+
     return "<table>" + "".join(rows_html) + "</table>"
 
 
 # ============================================================
-# 6. EPUB creation specifically tuned for your reconstructed DOCX
+# 6. EPUB builder
 # ============================================================
 class ChapterBuffer:
     def __init__(self, title: str):
         self.title = title
         self.body: List[str] = []
         self.subitems: List[Tuple[str, str]] = []
-
 
 
 def make_xhtml(title: str, body_html: str, css_item: epub.EpubItem) -> epub.EpubHtml:
@@ -408,8 +368,7 @@ def make_xhtml(title: str, body_html: str, css_item: epub.EpubItem) -> epub.Epub
     return ch
 
 
-
-def build_toc_page(doc: Document) -> str:
+def build_clean_toc_page(doc: Document) -> str:
     entries: List[str] = []
     in_toc = False
 
@@ -417,8 +376,7 @@ def build_toc_page(doc: Document) -> str:
         if not isinstance(block, Paragraph):
             continue
 
-        raw = clean_common_ocr_noise(block.text or "")
-        text = normalize_whitespace(raw)
+        text = normalize_whitespace(clean_common_ocr_noise(block.text or ""))
         if not text:
             continue
 
@@ -426,30 +384,27 @@ def build_toc_page(doc: Document) -> str:
             in_toc = True
             continue
 
-        if in_toc and text == "Предисловие":
-            entries.append('<div class="toc-entry">Предисловие</div>')
+        if not in_toc:
             continue
 
-        if in_toc and text.startswith("Лекция "):
-            entries.append('<div class="toc-entry large-gap"><strong>' + html.escape(clean_heading_text(text)) + '</strong></div>')
+        if text.startswith("Лекция "):
+            entries.append(f'<div class="toc-entry"><strong>{html.escape(clean_heading_text(text))}</strong></div>')
             continue
 
-        if in_toc and (is_probable_subheading(text) or text in {"Вопросы для самопроверки", "Список литературы"}):
-            entries.append('<div class="toc-entry">' + html.escape(text) + '</div>')
+        if text == "Предисловие" or is_probable_subheading(text) or text in {"Вопросы для самопроверки", "Список литературы"}:
+            entries.append(f'<div class="toc-entry">{html.escape(text)}</div>')
             continue
 
-        # stop when body clearly begins
-        if in_toc and text == "Предисловие" and len(entries) > 5:
+        if len(entries) > 20 and text == "Предисловие":
             break
 
-        if in_toc and len(entries) > 80:
+        if len(entries) > 120:
             break
 
     if not entries:
         return ""
 
     return '<h1 class="toc-title">Содержание</h1>' + "\n".join(entries)
-
 
 
 def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Optional[bytes] = None) -> bytes:
@@ -478,17 +433,19 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
     chapters: List[epub.EpubHtml] = []
     toc_items: List = []
 
-    toc_page = build_toc_page(doc)
-    if toc_page:
-        toc_ch = make_xhtml("Содержание", toc_page, nav_css)
-        book.add_item(toc_ch)
-        chapters.append(toc_ch)
-        toc_items.append(toc_ch)
+    toc_page_html = build_clean_toc_page(doc)
+    if toc_page_html:
+        toc_page = make_xhtml("Содержание", toc_page_html, nav_css)
+        book.add_item(toc_page)
+        chapters.append(toc_page)
+        toc_items.append(toc_page)
 
     current = ChapterBuffer(title)
+    skipping_raw_toc = False
 
     def flush_current() -> None:
         nonlocal current
+
         if not current.body:
             return
 
@@ -497,41 +454,31 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
         chapters.append(chapter)
 
         if current.subitems:
-            subchapters = []
+            sublinks = []
             for subtitle, anchor in current.subitems:
-                sec = epub.Section(current.title)
-                # not used directly; keeping subtitle links in tuple form
-                subchapters.append(epub.Link(chapter.file_name + anchor, subtitle, anchor.lstrip("#")))
-            toc_items.append((epub.Section(current.title), tuple(subchapters)))
+                sublinks.append(epub.Link(chapter.file_name + anchor, subtitle, anchor.lstrip("#")))
+            toc_items.append((epub.Section(current.title), tuple(sublinks)))
         else:
             toc_items.append(chapter)
 
         current = ChapterBuffer(title)
 
-    started_main_text = False
-    seen_toc_heading = False
-
     for block in iter_block_items(doc):
         if isinstance(block, Paragraph):
             raw_text = block.text or ""
-            cleaned_text = clean_common_ocr_noise(raw_text)
-            text = normalize_whitespace(cleaned_text)
+            text = normalize_whitespace(clean_common_ocr_noise(raw_text))
             heading_text = clean_heading_text(text)
             inline_images = extract_inline_images(block, image_map)
 
             if text == "Содержание":
-                seen_toc_heading = True
+                skipping_raw_toc = True
                 continue
 
-            # skip raw TOC area because we generate our own clean TOC page
-            if seen_toc_heading and not started_main_text:
+            if skipping_raw_toc:
                 if text == "Предисловие":
-                    seen_toc_heading = False
+                    skipping_raw_toc = False
                 else:
                     continue
-
-            if text:
-                started_main_text = True
 
             if has_page_break(block):
                 current.body.append('<div class="pagebreak"></div>')
@@ -539,7 +486,6 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
             if not text and not inline_images:
                 continue
 
-            # Main chapter headings
             if is_probable_main_heading(heading_text):
                 if current.body:
                     flush_current()
@@ -547,22 +493,18 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
                 current.body.append(f"<h1>{html.escape(heading_text)}</h1>")
                 continue
 
-            # Subheadings like 1.1., 2.3., etc.
             if is_probable_subheading(heading_text):
                 anchor_id = re.sub(r"[^a-zA-Z0-9а-яА-Я]+", "_", heading_text).strip("_")
                 current.body.append(f'<h2 id="{html.escape(anchor_id)}">{html.escape(heading_text)}</h2>')
                 current.subitems.append((heading_text, f"#{anchor_id}"))
                 continue
 
-            # Figure/table captions
             if re.match(r"^(Рис\.|Рисунок|Схема|Таблица)\s*\d+", heading_text):
                 current.body.append(f'<p class="caption">{html.escape(heading_text)}</p>')
             else:
                 rendered = render_runs(block)
-                if not rendered:
-                    fallback = heading_text
-                    if fallback and not looks_like_garbage(fallback):
-                        rendered = html.escape(fallback)
+                if not rendered and heading_text and not looks_like_garbage(heading_text):
+                    rendered = html.escape(heading_text)
 
                 if rendered:
                     extra_class = paragraph_alignment_class(block)
@@ -578,10 +520,10 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
     flush_current()
 
     if not chapters:
-        fallback_ch = make_xhtml(title, "<p>Документ пуст.</p>", nav_css)
-        book.add_item(fallback_ch)
-        chapters.append(fallback_ch)
-        toc_items.append(fallback_ch)
+        fallback = make_xhtml(title, "<p>Документ пуст.</p>", nav_css)
+        book.add_item(fallback)
+        chapters.append(fallback)
+        toc_items.append(fallback)
 
     book.toc = tuple(toc_items)
     book.add_item(epub.EpubNav())
@@ -600,8 +542,9 @@ def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Op
 async def start_cmd(message: Message):
     await message.answer(
         "👋 Привет!\n\n"
-        "Пришли сначала обложку, если она нужна, а потом файл .docx.\n"
-        "Я соберу EPUB, заточенный под твою восстановленную книгу: с более чистыми заголовками, содержанием и нормальной вставкой таблиц."
+        "Пришли обложку, если нужна, а затем DOCX.\n"
+        "Я соберу EPUB под твою восстановленную книгу: "
+        "с более чистыми заголовками, содержанием, таблицами и картинками."
     )
 
 
@@ -611,7 +554,7 @@ async def handle_photo(message: Message):
     file_info = await bot.get_file(photo.file_id)
     downloaded_file = await bot.download_file(file_info.file_path)
     user_data[message.from_user.id] = downloaded_file.read()
-    await message.reply("🖼 Обложка сохранена. Теперь отправь DOCX.")
+    await message.reply("🖼 Обложка сохранена. Теперь пришли DOCX.")
 
 
 @dp.message(F.document)
@@ -623,16 +566,14 @@ async def handle_docx(message: Message):
     status_msg = await message.answer("🚀 Принял файл, начинаю сборку EPUB...")
 
     try:
-        file_io = await bot.download(message.document.file_id)
+        file_info = await bot.get_file(message.document.file_id)
+        downloaded = await bot.download_file(file_info.file_path)
+        docx_bytes = downloaded.read()
+
         cover = user_data.get(message.from_user.id)
+        epub_data = create_epub_for_karabanova(docx_bytes, message.document.file_name, cover)
 
-        epub_data = create_epub_for_karabanova(
-            file_io.read(),
-            message.document.file_name,
-            cover,
-        )
-
-        new_name = message.document.file_name.rsplit('.', 1)[0] + ".epub"
+        new_name = message.document.file_name.rsplit(".", 1)[0] + ".epub"
         await message.answer_document(
             BufferedInputFile(epub_data, filename=new_name),
             caption=f"📚 Готово: {new_name}",
@@ -647,8 +588,7 @@ async def handle_docx(message: Message):
 
 
 async def main() -> None:
-   if not TOKEN:
-    raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
+    logger.info("Bot is starting...")
     await dp.start_polling(bot)
 
 
