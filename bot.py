@@ -7,6 +7,7 @@ import re
 import threading
 import uuid
 import zipfile
+import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional, Tuple
 
@@ -37,6 +38,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", "10000"))
+    print(f"HTTP stub starting on port {port}", flush=True)
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
@@ -406,15 +408,18 @@ def build_clean_toc_page(doc: Document) -> str:
     return '<h1 class="toc-title">Содержание</h1>' + "\n".join(entries)
 
 
-def create_epub_for_karabanova(docx_bytes: bytes, filename: str, cover_image: Optional[bytes] = None) -> bytes:
-    if not docx_bytes:
+def create_epub_for_karabanova_from_path(docx_path: str, filename: str, cover_image: Optional[bytes] = None) -> bytes:
+    if not os.path.exists(docx_path):
+        raise RuntimeError("Временный DOCX-файл не найден")
+
+    if os.path.getsize(docx_path) == 0:
         raise RuntimeError("DOCX-файл пустой")
 
-    if not zipfile.is_zipfile(io.BytesIO(docx_bytes)):
+    if not zipfile.is_zipfile(docx_path):
         raise RuntimeError("Файл не является корректным DOCX (ZIP-архивом)")
 
     try:
-        doc = Document(io.BytesIO(docx_bytes))
+        doc = Document(docx_path)
     except Exception as e:
         raise RuntimeError(f"Не удалось прочитать DOCX: {e}")
 
@@ -573,6 +578,8 @@ async def handle_docx(message: Message):
 
     status_msg = await message.answer("🚀 Принял файл, начинаю сборку EPUB...")
 
+    temp_path = None
+
     try:
         buffer = io.BytesIO()
         await bot.download(message.document, destination=buffer)
@@ -584,11 +591,19 @@ async def handle_docx(message: Message):
         if not docx_bytes:
             raise RuntimeError("Telegram вернул пустой файл")
 
-        if not zipfile.is_zipfile(io.BytesIO(docx_bytes)):
-            raise RuntimeError("Загруженный файл не является корректным DOCX")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+            tmp.write(docx_bytes)
+            temp_path = tmp.name
+
+        logger.info("Temporary DOCX saved to: %s", temp_path)
+        logger.info("Temporary DOCX size on disk: %s bytes", os.path.getsize(temp_path))
 
         cover = user_data.get(message.from_user.id)
-        epub_data = create_epub_for_karabanova(docx_bytes, message.document.file_name, cover)
+        epub_data = create_epub_for_karabanova_from_path(
+            temp_path,
+            message.document.file_name,
+            cover,
+        )
 
         new_name = message.document.file_name.rsplit(".", 1)[0] + ".epub"
         await message.answer_document(
@@ -602,6 +617,13 @@ async def handle_docx(message: Message):
     except Exception as exc:
         logger.exception("Conversion error")
         await message.answer(f"❌ Ошибка конвертации: {exc}")
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                logger.warning("Could not remove temporary file: %s", temp_path)
 
 
 async def main() -> None:
