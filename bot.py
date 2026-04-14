@@ -64,6 +64,67 @@ def create_epub(docx_bytes, filename, cover_image=None):
     book.set_title(title)
     book.set_language('ru')
 
+    if cover_image:
+        book.set_cover("cover.jpg", cover_image)
+
+    # Ресурс со стилями
+    nav_css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=STYLE)
+    book.add_item(nav_css)
+
+    chapters = []
+    current_chapter_title = "Начало"
+    current_chapter_content = "<html><body>"
+    
+    # Обработка изображений (собираем их заранее)
+    img_counter = 0
+    for rel in doc.part.rels.values():
+        if "image" in rel.target_ref:
+            img_counter += 1
+            img_name = f"img_{img_counter}.png"
+            epub_img = epub.EpubItem(uid=f"img_{img_counter}", file_name=img_name, 
+                                     media_type="image/png", content=rel.target_part.blob)
+            book.add_item(epub_img)
+
+    # Проходим по параграфам и разбиваем на главы
+    for para in doc.paragraphs:
+        # Проверяем, является ли параграф заголовком ( Heading 1 или Heading 2)
+        is_heading = para.style.name.startswith('Heading')
+        
+        if is_heading and len(current_chapter_content) > 20: # Если встретили заголовок и старая глава не пуста
+            # Закрываем старую главу
+            current_chapter_content += "</body></html>"
+            ch = epub.EpubHtml(title=current_chapter_title, file_name=f'chap_{len(chapters)}.xhtml')
+            ch.content = current_chapter_content
+            ch.add_item(nav_css)
+            book.add_item(ch)
+            chapters.append(ch)
+            
+            # Начинаем новую главу
+            current_chapter_title = para.text
+            current_chapter_content = f"<html><body><h1>{para.text}</h1>"
+        else:
+            # Просто добавляем текст
+            if para.text.strip():
+                current_chapter_content += f"<p>{para.text}</p>"
+
+    # Добавляем последнюю главу
+    current_chapter_content += "</body></html>"
+    ch = epub.EpubHtml(title=current_chapter_title, file_name=f'chap_{len(chapters)}.xhtml')
+    ch.content = current_chapter_content
+    ch.add_item(nav_css)
+    book.add_item(ch)
+    chapters.append(ch)
+
+    # Настраиваем структуру
+    book.toc = tuple(chapters)
+    book.add_item(epub.EpubNav())
+    book.add_item(epub.EpubNcx())
+    book.spine = ['nav'] + chapters
+
+    out = io.BytesIO()
+    epub.write_epub(out, book, {})
+    return out.getvalue()
+
     # Добавляем обложку, если она есть
     if cover_image:
         book.set_cover("cover.jpg", cover_image)
